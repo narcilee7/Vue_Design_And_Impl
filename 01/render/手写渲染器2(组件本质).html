@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>组件的本质 + 持续集成Render</title>
+</head>
+
+<body>
+
+</body>
+
+<script>
+  // 虚拟DOM还可以描述组件
+  const MyComponent = function () {
+    return {
+      tag: 'div',
+      props: {
+        onClick: () => alert("hello")
+      },
+      children: 'click me'
+    }
+  }
+
+  const vnode = {
+    tag: MyComponent
+  }
+
+  function Render(vnode, containers) {
+    if (typeof vnode.tag == 'string') {
+      mountElement(vnode, containers)
+    } else if (typeof vnode.tag == 'object') {
+      // 组件
+      mountComponent(vnode, containers)
+    }
+  }
+
+  function mountElement(vnode, containers) {
+    const el = document.createElement(vnode.tag)
+
+    for (const key in vnode.props) {
+      if (/^on/.test(key)) {
+        el.addEventListener(key.slice(2).toLowerCase(), vnode.props[key])
+      }
+    }
+
+    if (typeof vnode.children === 'string') {
+      el.appendChild(document.createTextNode(vnode.children))
+    } else if (Array.isArray(vnode.children)) {
+      vnode.children.forEach(child => {
+        Render(child, el)
+      })
+    }
+
+    containers.appendChild(el)
+  }
+
+  function mountComponent(vnode, containers) {
+    // vnode.tag是组件对象，调用它的render函数得到组件要渲染的内容
+    const subtree = vnode.tag()
+    // 递归调用Render渲染组件的虚拟DOM
+    Render(subtree, containers)
+  }
+
+  Render(vnode, document.body)
+
+</script>
+
+</html>

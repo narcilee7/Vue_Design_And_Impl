@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>纯运行时框架</title>
+</head>
+
+<body>
+</body>
+
+<script>
+  const testObj = {
+    tag: 'div',
+    children: [
+      {
+        tag: 'span',
+        children: 'Hello, World!'
+      }
+    ]
+  }
+
+  function Render(obj, root) {
+    const el = document.createElement(obj.tag)
+    if (typeof obj.children === 'string') {
+      el.append(document.createTextNode(obj.children))
+    } else if (obj.children) {
+      obj.children.forEach(child => {
+        Render(child, el)
+      })
+    }
+
+    root.append(el)
+  }
+
+  Render(testObj, document.body)
+</script>
+
+</html>
