@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>响应式实现第五版</title>
+</head>
+
+<body>
+
+</body>
+
+<script>
+  // 存储副作用函数的桶
+  const bucket = new WeakMap();
+
+  // 原始数据
+  const data = { foo: 1 };
+
+  // 存储被注册的副作用函数
+  let activeEffect;
+
+  // effect栈
+  const effectStack = [];
+
+  // 用于注册副作用函数
+  function effect(fn) {
+    const effectFn = () => {
+      // 先cleanup清除副作用函数从依赖集合
+      cleanup(effectFn);
+      // 在调用副作用函数之前，先将当前副作用函数从桶中取出，赋值给activeEffect
+      activeEffect = effectFn;
+      // 在调用副作用函数之前将当前的副作用函数压入栈中
+      effectStack.push(effectFn);
+      fn();
+      // 执行完毕之后，将当前副作用函数弹出栈，并还原当前正在执行的副作用函数
+      effectStack.pop();
+      activeEffect = effectStack[effectStack.length - 1];
+    }
+    // activeEffect.deps 用于存储所有依赖该数据的副作用函数
+    effectFn.deps = [];
+    effectFn();
+  }
+
+  // cleanup清洁
+  function cleanup(effectFn) {
+    for (let i = 0; i < effectFn.deps.length; i++) {
+      const deps = effectFn.deps[i];
+      deps.delete(effectFn);
+    }
+    // 因为JavaScript中length 属性是只读的，所以显式处理
+    effectFn.deps.length = 0;
+  }
+
+  // get拦截函数内调用，追踪变化
+  function track(target, key) {
+    if (!activeEffect) return;
+    let depsMap = bucket.get(target);
+    if (!depsMap) {
+      bucket.set(target, (depsMap = new Map()));
+    }
+    let deps = depsMap.get(key);
+    if (!deps) {
+      depsMap.set(key, (deps = new Set()));
+    }
+    // 把当前激活的副作用函数添加到依赖集合deps中
+    deps.add(activeEffect);
+    // deps就是一个与当前副作用函数存在联系的依赖集合
+    activeEffect.deps.push(deps);
+  }
+
+  // set拦截函数内调用，触发变化
+  function trigger(target, key) {
+    const depsMap = bucket.get(target);
+    if (!depsMap) return;
+    const effects = depsMap.get(key);
+    // 避免重复对set集合里面的函数进行delete add无限循环操作，重新构造新的Set并遍历，代替直接遍历effects集合
+    const effectsToRun = new Set(effects);
+    effectsToRun && effectsToRun.forEach(effectFn => effectFn());
+  }
+
+  // 对原始数据进行处理
+  const obj = new Proxy(data, {
+    // 拦截读取
+    get(target, key) {
+      track(target, key);
+      return target[key];
+    },
+    // 拦截设置
+    set(target, key, newValue) {
+      target[key] = newValue;
+      trigger(target, key);
+    }
+  })
+
+  effect(() => {
+    obj.foo++;
+  })
+</script>
+
+</html>

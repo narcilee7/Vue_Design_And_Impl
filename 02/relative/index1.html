@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>响应式实现第一版</title>
+</head>
+
+<body>
+
+</body>
+
+<script>
+  // 存储副作用函数的桶
+  const bucket = new Set();
+
+  const data = { text: 'hello world' };
+
+  // 对原始数据进行处理
+  const obj = new Proxy(data, {
+    // 拦截读取
+    get(target, key) {
+      bucket.add(effect);
+      return target[key];
+    },
+    // 拦截设置
+    set(target, key, newValue) {
+      target[key] = newValue;
+      bucket.forEach(fn => fn());
+      return true;
+    }
+  })
+
+  function effect() {
+    document.body.innerText = obj.text;
+    console.log('effect');
+  }
+
+  effect();
+
+  setTimeout(() => {
+    obj.text = 'Hello ByteDance';
+  }, 1000);
+</script>
+
+</html>
