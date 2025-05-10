@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>响应式实现第十三版本 + 代理数组</title>
+</head>
+
+<body>
+
+</body>
+
+<script>
+  // 存储副作用函数的桶
+  const bucket = new WeakMap();
+  // 原始数据
+  const data = { foo: 1, bar: 2 };
+  // 存储被注册的副作用函数
+  let activeEffect;
+  // effect栈
+  const effectStack = [];
+
+  // 任务队列
+  const jobQueue = new Set();
+  const p = Promise.resolve();
+  let isFlushing = false;
+  function flushJob() {
+    if (isFlushing) return;
+    isFlushing = true;
+    // 执行微任务队列中的任务
+    p.then(() => {
+      jobQueue.forEach(job => job());
+    }).finally(() => {
+      isFlushing = false;
+    });
+  }
+
+  // 操作类型
+  const TriggerType = {
+    SET: 'SET',
+    ADD: 'ADD',
+    DELETE: 'DELETE',
+    ITERATE: 'ITERATE'
+  }
+
+  // ITERATE_KEY 用来标识迭代器
+  const ITERATE_KEY = Symbol();
+
+  // 定义一个Map实例，存储原始对象到代理对象的映射
+  const reactiveMap = new Map();
+
+  // 一个标志位，代表是否正在追踪
+  let shouldTrack = true;
+
+  // 数组重写方法
+  const arrayInstrumentations = {};
+  ['includes', 'indexOf', 'lastIndexOf'].forEach(method => {
+    const originMethod = Array.prototype[method];
+    arrayInstrumentations[method] = function (...args) {
+      // 数组中是 proxy 对象，应该尝试用原始对象再判断一次
+      if (res === false || res === -1) {
+        res = originMethod.apply(
+          this,
+          args.map(arg => (arg?.raw ? arg.raw : arg))
+        )
+      }
+      return res;
+    };
+  });
+
+  ['push', 'pop', 'shift', 'unshift', 'splice'].forEach(method => {
+    const originMethod = Array.prototype[method];
+    arrayInstrumentations[method] = function (...args) {
+      shouldTrack = false;
+      const res = originMethod.apply(this, args);
+      shouldTrack = true;
+      // 操作数组后主动触发对于length的响应
+      trigger(this, 'length', TriggerType.SET);
+      return res;
+    }
+  });
+
+  // 用于注册副作用函数
+  function effect(fn, options = {}) {
+    const effectFn = () => {
+      // 先cleanup清除副作用函数从依赖集合
+      cleanup(effectFn);
+      // 在调用副作用函数之前，先将当前副作用函数从桶中取出，赋值给activeEffect
+      activeEffect = effectFn;
+      // 在调用副作用函数之前将当前的副作用函数压入栈中
+      effectStack.push(effectFn);
+      const res = fn();
+      // 执行完毕之后，将当前副作用函数弹出栈，并还原当前正在执行的副作用函数
+      effectStack.pop();
+      activeEffect = effectStack[effectStack.length - 1];
+      // 将res返回
+      return res;
+    }
+    // 将options挂载到effectFn上
+    effectFn.options = options;
+    // activeEffect.deps 用于存储所有依赖该数据的副作用函数
+    effectFn.deps = [];
+    // 只有非lazy的时候，才执行
+    if (!options.lazy) {
+      // 执行
+      effectFn();
+    }
+    // 返回effectFn，这样就可以拿到effectFn了，且保证副作用函数是否立即执行是可以控制的
+    return effectFn;
+  }
+
+  // cleanup清除依赖函数
+  function cleanup(effectFn) {
+    for (let i = 0; i < effectFn.deps.length; i++) {
+      const deps = effectFn.deps[i];
+      deps.delete(effectFn);
+    }
+    // 因为JavaScript中length 属性是只读的，所以显式处理
+    effectFn.deps.length = 0;
+  }
+
+  // get拦截函数内调用，追踪变化
+  function track(target, key) {
+    if (!activeEffect || !shouldTrack) return;
+    let depsMap = bucket.get(target);
+    if (!depsMap) {
+      // 如果不存在，新建映射关系
+      bucket.set(target, (depsMap = new Map()));
+    }
+    // 获取effectFn对应的依赖集合deps
+    let deps = depsMap.get(key);
+    if (!deps) {
+      // 如果不存在，新建依赖集合deps
+      depsMap.set(key, (deps = new Set()));
+    }
+    // 把当前激活的副作用函数添加到依赖集合deps中
+    deps.add(activeEffect);
+    // deps就是一个与当前副作用函数存在联系的依赖集合
+    activeEffect.deps.push(deps);
+  }
+
+  // set拦截函数内调用，触发变化
+  function trigger(target, key, type, newValue) {
+    const depsMap = bucket.get(target);
+    if (!depsMap) return;
+    const effects = depsMap.get(key);
+    // 避免重复对set集合里面的函数进行delete add无限循环操作，重新构造新的Set并遍历，代替直接遍历effects集合
+    // 取得与ITERATE_KEY相关联的副作用函数
+    const iterateEffects = depsMap.get(ITERATE_KEY);
+
+    const effectsToRun = new Set(effects);
+    effects && effects.forEach(effectFn => {
+      // 不重复添加
+      if (effectFn !== activeEffect) {
+        effectsToRun.add(effectFn);
+      }
+    });
+
+
+    if (type === 'ADD' || type === 'DELETE') {
+      // 如果是ADD，则需要触发ITERATE_KEY对应的副作用函数
+      const iterateEffects = depsMap.get(ITERATE_KEY);
+      iterateEffects && iterateEffects.forEach(effectFn => {
+        // 不重复添加
+        if (effectFn !== activeEffect) {
+          effectsToRun.add(effectFn);
+        }
+      });
+    }
+
+    if (type === 'ADD' && Array.isArray(target)) {
+      // 取出与length相关联的副作用函数
+      const lengthEffects = depsMap.get('length');
+
+      lengthEffects && lengthEffects.forEach(effectFn => {
+        // 不重复添加
+        if (effectFn !== activeEffect) {
+          effectsToRun.add(effectFn);
+        }
+      });
+    }
+    // 如果操作的目标是数组，并且修改了数组的length属性
+    if (Array.isArray(target) && key === 'length') {
+      // 对于索引大于等于新的length值的元素，需要触发对应索引的副作用函数
+
+      depsMap.forEach((effects, key) => {
+        if (key >= newValue) {
+          effects.forEach(effectFn => {
+            if (effectFn !== activeEffect) {
+              effectsToRun.add(effectFn);
+            }
+          });
+        }
+      });
+    }
+
+
+    effectsToRun.forEach(effectFn => {
+      // 如果有调度器，则调用调度器，将effectFn传入
+      if (effectFn.options.scheduler) {
+        effectFn.options.scheduler(effectFn);
+      } else {
+        // 否则直接执行
+        effectFn();
+      }
+    });
+  }
+
+  function computed(getter) {
+    // 创建一个缓存值，缓存上一次计算的值
+    let value
+    // dirty 用来标识是否需要重新计算值，默认为true，即需要计算
+    let dirty = true
+
+    // 把getter作为副作用函数，创建一个lazy的effect
+    const effecFn = effect(getter, {
+      lazy: true,
+      scheduler() {
+        if (!dirty) {
+          dirty = true
+          // 当计算属性依赖的响应式数据变化时，手动调用trigger函数触发响应，防止effect嵌套
+          trigger(obj, 'value')
+        }
+      }
+    })
+
+    const obj = {
+      get value() {
+        // 只有脏的时候才计算值，并将得到的值缓存起来，设置dirty为false
+        if (dirty) {
+          value = effecFn();
+          dirty = false;
+        }
+        // 手动触发依赖收集，避免effect嵌套
+        track(obj, 'value')
+        // 当读取value时，调用effectFn，并返回getter的返回值
+        return value;
+      }
+    }
+
+    return obj;
+  }
+
+  /** 创建响应式对象
+   * @param {Object} obj
+   * @param {Boolean} isShallow 是否是浅响应
+   * @returns
+   */
+  function createReactive(obj, isShallow = false, isReadonly = false) {
+    return new Proxy(obj, {
+      get(target, key, receiver) {
+        // 代理对象的raw属性，指向原始对象
+        if (key === 'raw') {
+          // 访问原始数据
+          return target;
+        }
+
+        // 如果操作的对象是数组，并且key存在于arrayInstrumentations上，则使用arrayInstrumentations上的值
+        if (Array.isArray(target) && arrayInstrumentations.hasOwnProperty(key)) {
+          return Reflect.get(arrayInstrumentations, key, receiver);
+        }
+
+        // 只有读操作，并且key的类型不是symbol, 才需要收集依赖
+        if (!isReadonly && typeof key !== 'symbol') {
+          track(target, key);
+        }
+
+        const res = Reflect.get(target, key, receiver);
+
+        if (isShallow) {
+          // 浅响应
+          return res;
+        }
+
+        if (typeof res === 'object' && res !== null) {
+          // 如果数据为只读，则调用readonly对值进行封装
+          return isReadonly ? readonly(res) : reactive(res);
+        }
+
+        return res;
+      },
+      // 拦截设置
+      set(target, key, newValue, receiver) {
+        if (isReadonly) {
+          // 只读属性，不能修改
+          console.warn(`属性${key}是只读的`);
+          return true;
+        }
+        const oldValue = target[key];
+        /**
+         * 如果属性不存在，则说明是添加新属性，否则是设置已有属性
+         * 如果代理目标是数组，则检测被设置的索引值是否小于数组长度
+         * 如果是视作是SET操作，否则是ADD
+        */
+        const type = Array.isArray(target)
+          ? Number(key) < target.length ? 'SET' : 'ADD'
+          : Reflect.has(target, key) ? 'SET' : 'ADD';
+
+        const res = Reflect.set(target, key, newValue, receiver);
+
+        // target === receiver.raw 说明receiver就是target的代理对象
+        if (target === receiver.raw) {
+          if (oldValue !== newValue || (oldValue === oldValue && newValue === newValue)) {
+            // 增加第四个参数，即触发响应的新的值
+            trigger(target, key, type, newValue);
+          }
+        }
+        return res;
+      },
+      deleteProperty(target, key) {
+        if (isReadonly) {
+          console.warn(`属性${key}是只读的`);
+          return true;
+        }
+
+        // 检查被操作的属性是否在target中
+        const hasKey = Reflect.has(target, key);
+        const res = Reflect.deleteProperty(target, key);
+
+        if (res && hasKey) {
+          trigger(target, key, TriggerType.DELETE);
+        }
+
+        return res;
+      },
+      // 处理 for ... in
+      ownKeys(target) {
+        track(target, ITERATE_KEY);
+        return Reflect.ownKeys(target);
+      }
+    })
+  }
+
+  function reactive(obj) {
+    // 优先通过原始对象obj寻找之前创建的代理对象，找到了直接返回已有的代理对象
+    const existionProxy = reactiveMap.get(obj);
+    if (existionProxy) {
+      return existionProxy;
+    }
+    const proxy = createReactive(obj);
+    // 存储
+    reactiveMap.set(obj, proxy);
+    return proxy;
+  }
+
+  function shallowReactive(obj) {
+    return createReactive(obj, true);
+  }
+
+  function readonly(obj) {
+    return createReactive(obj, false, true);
+  }
+
+  function shallowReadonly(obj) {
+    return createReactive(obj, true /* shallow */, true /* 只读 */);
+  }
+
+  /**
+   * 监听
+   * @param {*} source 响应式数据
+   * @param {*} callback 回调函数
+   * 
+   * watch的本质就是对effect的二次封装
+   */
+  function watch(source, callback, options = {}) {
+    // 实现getter函数
+    let getter;
+    // 如果source是函数，则说明用户传递getter，将source赋值给getter
+    if (typeof source === 'function') {
+      getter = source;
+    } else {
+      // 如果是对象，则调用traverse递归读取数据
+      getter = () => traverse(source);
+    }
+    // 实现oldValue和newValue
+    let oldValue, newValue;
+
+    // cleanup用来存储用户注册的过期回调
+    let cleanup;
+
+    // onInvalidate用来实现invalidate
+    function onInvalidate(fn) {
+      // 将过期回调存储到cleanup中
+      cleanup = fn;
+    }
+
+    // 提取scheduler为一个独立的job函数
+    const job = () => {
+      newValue = effectFn();
+      // 如果有cleanup，则执行
+      if (cleanup) {
+        cleanup();
+      }
+      callback(newValue, oldValue, onInvalidate);
+      oldValue = newValue;
+    }
+
+    // 使用efect注册副作用函数时，开启lazy选项，并把返回值存储给effectFn中以便后续手动调用
+    const effectFn = effect(
+      // 读取source，并把结果返回
+      () => getter(),
+      {
+        lazy: true,
+        // job函数作为调度器函数
+        // @todo 实现 flush === 'pre' 的情况，
+        scheduler: () => {
+          // 判断flush是否为'post', 则等待下一次微任务执行 job函数
+          if (options.flush === 'post') {
+            // 异步执行
+            const p = Promise.resolve();
+            p.then(job);
+          } else {
+            // 'sync' 同步执行
+            job();
+          }
+        }
+      }
+    )
+    if (options.immediate) {
+      // 立即执行 oldValue === undefined
+      job();
+    } else {
+      // 手动调用副作用函数，拿到的值就是旧值
+      oldValue = effectFn();
+    }
+  }
+
+  function traverse(value, seen = new Set()) {
+    if (typeof value !== 'object' || value === null || seen.has(value)) return;
+    seen.add(value);
+    // @todo: 实现别的数据结构
+    for (const key in value) {
+      // 递归读取数据
+      traverse(value[key], seen);
+    }
+    return value;
+  }
+
+</script>
+
+</html>
